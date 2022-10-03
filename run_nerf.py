@@ -24,8 +24,11 @@ np.random.seed(0)
 DEBUG = False
 
 
+# 会把 embedded 数组分批输入到网络 fn 中，前向传播得到对应的 （RGB，A）
 def batchify(fn, chunk):
-    """Constructs a version of 'fn' that applies to smaller batches.
+    """
+    Constructs a version of 'fn' that applies to smaller batches.
+    将编码过的点以批处理的形式输入到 网络模型 中得到 输出 (RGB,A)
     """
     if chunk is None:
         return fn
@@ -34,29 +37,37 @@ def batchify(fn, chunk):
     return ret
 
 
+# 生成给定点的颜色和密度
 def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
-    """Prepares inputs and applies network 'fn'.
+    """
+    Prepares inputs and applies network 'fn'.
+    对 input 进行处理，应用 神经网络 fn
     """
     inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
-    embedded = embed_fn(inputs_flat)
-
+    embedded = embed_fn(inputs_flat)  # 对输入进行位置编码，得到编码后的结果，是一个 array 数组
+ 
+    # 视图不为 None，即输入了视图方向，那么我们就应该考虑对视图方向作出处理，用以生成颜色
     if viewdirs is not None:
         input_dirs = viewdirs[:,None].expand(inputs.shape)
         input_dirs_flat = torch.reshape(input_dirs, [-1, input_dirs.shape[-1]])
-        embedded_dirs = embeddirs_fn(input_dirs_flat)
-        embedded = torch.cat([embedded, embedded_dirs], -1)
+        embedded_dirs = embeddirs_fn(input_dirs_flat)         # 对输入方向进行编码
+        embedded = torch.cat([embedded, embedded_dirs], -1)   # 将编码后的位置和方向聚合到一起
 
-    outputs_flat = batchify(fn, netchunk)(embedded)
+    outputs_flat = batchify(fn, netchunk)(embedded)     # 将编码过的点以批处理的形式输入到 网络模型 中得到 输出（RGB,A）
     outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
     return outputs
 
 
 def batchify_rays(rays_flat, chunk=1024*32, **kwargs):
-    """Render rays in smaller minibatches to avoid OOM.
+    """
+    Render rays in smaller minibatches to avoid OOM.
+    以较小的小批量渲染光线以避免OOM。
+    oom就是内存溢出,指需要的内存空间大于系统分配的内存空间,oom后果就是项目程序crash
     """
     all_ret = {}
     for i in range(0, rays_flat.shape[0], chunk):
-        ret = render_rays(rays_flat[i:i+chunk], **kwargs)
+        # 渲染光线
+        ret = render_rays(rays_flat[i:i+chunk], **kwargs) 
         for k in ret:
             if k not in all_ret:
                 all_ret[k] = []
@@ -99,7 +110,8 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
         # use provided ray batch
         rays_o, rays_d = rays
 
-    if use_viewdirs:
+    # 如果使用视图方向，根据光线的 ray_d 计算单位方向作为 view_dirs
+    if use_viewdirs:  
         # provide ray directions as input
         viewdirs = rays_d
         if c2w_staticcam is not None:
@@ -117,13 +129,16 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
     rays_o = torch.reshape(rays_o, [-1,3]).float()
     rays_d = torch.reshape(rays_d, [-1,3]).float()
 
+    # 生成光线的远近端，用于确定边界框，并将其聚合到 rays 中
     near, far = near * torch.ones_like(rays_d[...,:1]), far * torch.ones_like(rays_d[...,:1])
     rays = torch.cat([rays_o, rays_d, near, far], -1)
+    # 视图方向聚合到光线中
     if use_viewdirs:
         rays = torch.cat([rays, viewdirs], -1)
 
-    # Render and reshape
-    all_ret = batchify_rays(rays, chunk, **kwargs)
+    # Render and reshape  
+    # 开始并行计算光线属性
+    all_ret = batchify_rays(rays, chunk, **kwargs)  # 光线的 ray_o、ray_d、near、far、viewdirs 并投入到批处理程序 batchify_rays() 中。
     for k in all_ret:
         k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
         all_ret[k] = torch.reshape(all_ret[k], k_sh)
@@ -176,8 +191,13 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
 
 
 def create_nerf(args):
-    """Instantiate NeRF's MLP model.
+
     """
+    Instantiate NeRF's MLP model.
+    实例化 NeRF 的 MLP 网络模型
+    """
+
+    # 获得一个编码器 embed_fn 以及一个编码后的维度 input_ch 
     embed_fn, input_ch = get_embedder(args.multires, args.i_embed)
 
     input_ch_views = 0
@@ -186,24 +206,33 @@ def create_nerf(args):
         embeddirs_fn, input_ch_views = get_embedder(args.multires_views, args.i_embed)
     output_ch = 5 if args.N_importance > 0 else 4
     skips = [4]
+    # 初始化MLP模型参数
     model = NeRF(D=args.netdepth, W=args.netwidth,
                  input_ch=input_ch, output_ch=output_ch, skips=skips,
                  input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
+    # 模型中的梯度变量
     grad_vars = list(model.parameters())
 
     model_fine = None
     if args.N_importance > 0:
+        # 初始化MLP模型参数
         model_fine = NeRF(D=args.netdepth_fine, W=args.netwidth_fine,
                           input_ch=input_ch, output_ch=output_ch, skips=skips,
                           input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
+        # 模型中的梯度变量
         grad_vars += list(model_fine.parameters())
 
+    # 定义一个查询点的颜色和密度的匿名函数，实际上给定点坐标，方向，以及查询网络，
+    # 我们就可以得到该点在该网络下的输出（[rgb,alpha]）
     network_query_fn = lambda inputs, viewdirs, network_fn : run_network(inputs, viewdirs, network_fn,
                                                                 embed_fn=embed_fn,
                                                                 embeddirs_fn=embeddirs_fn,
                                                                 netchunk=args.netchunk)
+    # network_query_fn 是一个匿名函数，真正起作用的函数是 run_network() 。
+    # run_network() ：生成给定点的颜色和密度。
 
     # Create optimizer
+    # 创建网络的优化器
     optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
 
     start = 0
@@ -234,19 +263,38 @@ def create_nerf(args):
 
     ##########################
 
+    # 现在整体的初始化已经完成，需要对返回值进行一些处理
     render_kwargs_train = {
         'network_query_fn' : network_query_fn,
+        # 匿名函数，输入位置坐标，方向坐标，以及神经网络，就可以利用神经网络返回该点对应的 颜色和密度
+
         'perturb' : args.perturb,
+        # 扰动，对整体算法理解没有影响
+
         'N_importance' : args.N_importance,
+        # 每条光线上细采样点的数量
+
         'network_fine' : model_fine,
+        # 论文中的 精细网络
+
         'N_samples' : args.N_samples,
+        # 每条光线上粗采样点的数量
+
         'network_fn' : model,
+        # 论文中的 粗网络
+
         'use_viewdirs' : args.use_viewdirs,
+        # 是否使用视点方向，影响到神经网络是否输出颜色
+
         'white_bkgd' : args.white_bkgd,
+        # 如果为 True 将输入的 png 图像的透明部分转换成白色
+
         'raw_noise_std' : args.raw_noise_std,
+        # 归一化密度
     }
 
     # NDC only good for LLFF-style forward facing data
+    # NDC 空间，只对前向场景有效
     if args.dataset_type != 'llff' or args.no_ndc:
         print('Not ndc!')
         render_kwargs_train['ndc'] = False
@@ -259,8 +307,11 @@ def create_nerf(args):
     return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer
 
 
+# raw2outputs() 函数将离散的点进行积分，得到对应的像素颜色。
 def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
-    """Transforms model's predictions to semantically meaningful values.
+    """
+    Transforms model's predictions to semantically meaningful values.
+    将模型的预测转换为语义上有意义的值。
     Args:
         raw: [num_rays, num_samples along ray, 4]. Prediction from model.
         z_vals: [num_rays, num_samples along ray]. Integration time.
@@ -274,12 +325,12 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
     """
     raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
 
-    dists = z_vals[...,1:] - z_vals[...,:-1]
+    dists = z_vals[...,1:] - z_vals[...,:-1]   # 计算两点Z轴之间的距离
     dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
 
-    dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
+    dists = dists * torch.norm(rays_d[...,None,:], dim=-1)   # 将 Z 轴之间的距离转换为实际距离
 
-    rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
+    rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]  每个点的 RGB 值
     noise = 0.
     if raw_noise_std > 0.:
         noise = torch.randn(raw[...,3].shape) * raw_noise_std
@@ -290,10 +341,10 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
             noise = np.random.rand(*list(raw[...,3].shape)) * raw_noise_std
             noise = torch.Tensor(noise)
 
-    alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
+    alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]  即不透明度
     # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
     weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
-    rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
+    rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]  rgb_map 代表了最终的渲染颜色
 
     depth_map = torch.sum(weights * z_vals, -1)
     disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
@@ -318,6 +369,7 @@ def render_rays(ray_batch,
                 raw_noise_std=0.,
                 verbose=False,
                 pytest=False):
+    # 从 ray 中分离出 rays_o, rays_d, viewdirs, near, far
     """Volumetric rendering.
     Args:
       ray_batch: array of shape [batch_size, ...]. All information necessary
@@ -354,7 +406,9 @@ def render_rays(ray_batch,
     bounds = torch.reshape(ray_batch[...,6:8], [-1,1,2])
     near, far = bounds[...,0], bounds[...,1] # [-1,1]
 
-    t_vals = torch.linspace(0., 1., steps=N_samples)
+    # 确定空间中一个坐标的 Z 轴位置
+    t_vals = torch.linspace(0., 1., steps=N_samples)  # 在 0-1 内生成 N_samples 个等差点
+    # 根据参数确定不同的采样方式,从而确定 Z 轴在边界框内的的具体位置
     if not lindisp:
         z_vals = near * (1.-t_vals) + far * (t_vals)
     else:
@@ -378,29 +432,38 @@ def render_rays(ray_batch,
 
         z_vals = lower + (upper - lower) * t_rand
 
+    # (1) 生成光线上每个采样点的位置
     pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
 
 
 #     raw = run_network(pts)
+    # (2) 将光线上的每个点投入到 MLP 网络 network_fn 中前向传播得到每个点对应的 （RGB，A）
     raw = network_query_fn(pts, viewdirs, network_fn)
     rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
+    # 分层采样的细采样阶段
     if N_importance > 0:
 
         rgb_map_0, disp_map_0, acc_map_0 = rgb_map, disp_map, acc_map
 
         z_vals_mid = .5 * (z_vals[...,1:] + z_vals[...,:-1])
+        # 根据权重 weight 判断这个点在物体表面附近的概率，重新采样
         z_samples = sample_pdf(z_vals_mid, weights[...,1:-1], N_importance, det=(perturb==0.), pytest=pytest)
         z_samples = z_samples.detach()
 
         z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
-        pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples + N_importance, 3]
+        # 生成新的采样点坐标
+        pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples + N_importance, 3]  
 
         run_fn = network_fn if network_fine is None else network_fine
 #         raw = run_network(pts, fn=run_fn)
+        # 生成新采样点的颜色密度
         raw = network_query_fn(pts, viewdirs, run_fn)
 
-        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
+        # (3) 对这些离散点进行体积渲染，即进行积分操作
+        # 生成细化的像素点的颜色
+        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)  
+                                                       # raw2outputs() 函数将离散的点进行积分，得到对应的像素颜色。
 
     ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map}
     if retraw:
@@ -533,10 +596,11 @@ def config_parser():
 
 def train():
 
+    # 设置参数
     parser = config_parser()
     args = parser.parse_args()
 
-    # Load data
+    # 1. Load data
     K = None
     if args.dataset_type == 'llff':
         images, poses, bds, render_poses, i_test = load_llff_data(args.datadir, args.factor,
@@ -567,14 +631,20 @@ def train():
         print('NEAR FAR', near, far)
 
     elif args.dataset_type == 'blender':
+        #读取图像的数组、图像的高宽焦距、相机的 pose 、以及用于分割测试集、训练集的分割数组。
         images, poses, render_poses, hwf, i_split = load_blender_data(args.datadir, args.half_res, args.testskip)
         print('Loaded blender', images.shape, render_poses.shape, hwf, args.datadir)
         i_train, i_val, i_test = i_split
 
+        # 设定边界框的远近边界
         near = 2.
         far = 6.
 
+        # 将 RGBA 转换成 RGB 图像
+        # (RGBA是一种色彩空间的模型,由RGB色彩空间和Alpha通道组成。)
+        # (RGBA代表红(Red)、绿(Green)、蓝(Blue)和Alpha通道(Alpha)。Alpha通道为图像的不透明度参数。 )
         if args.white_bkgd:
+            # 如果使用白色背景
             images = images[...,:3]*images[...,-1:] + (1.-images[...,-1:])
         else:
             images = images[...,:3]
@@ -612,7 +682,7 @@ def train():
     H, W = int(H), int(W)
     hwf = [H, W, focal]
 
-    if K is None:
+    if K is None:    # K 指的是相机的内参
         K = np.array([
             [focal, 0, 0.5*W],
             [0, focal, 0.5*H],
@@ -636,14 +706,22 @@ def train():
         with open(f, 'w') as file:
             file.write(open(args.config, 'r').read())
 
-    # Create nerf model
+    # 2. Create nerf model
+    # 2. 初始化 NeRF 网络模型
     render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_nerf(args)
+    # render_kwargs_train：一个字典，包含了用于训练的各个参数值
+    # render_kwargs_test：一个字典，包含了用于测试的各个参数值
+    # start:
+    # grad_vars: 整个网络的梯度变量
+    # optimizer: 整个网络的优化器
+
     global_step = start
 
     bds_dict = {
         'near' : near,
         'far' : far,
     }
+    # 更新字典，加入三维空间的边界框 bounding box
     render_kwargs_train.update(bds_dict)
     render_kwargs_test.update(bds_dict)
 
@@ -672,10 +750,15 @@ def train():
             return
 
     # Prepare raybatch tensor if batching random rays
+    # 开始读取光线以及光线对应的像素值
     N_rand = args.N_rand
-    use_batching = not args.no_batching
+    # 是否以批处理的形式生成光线  
+    use_batching = not args.no_batching  # use_batching 参数决定了是否从多个角度进行光线投射。
+    
+    # 3. 如果以批处理的形式进行训练，首先生成所有图片的光线
     if use_batching:
         # For random ray batching
+        # 用于随机射线批处理
         print('get rays')
         rays = np.stack([get_rays_np(H, W, K, p) for p in poses[:,:3,:4]], 0) # [N, ro+rd, H, W, 3]
         print('done, concats')
@@ -685,7 +768,7 @@ def train():
         rays_rgb = np.reshape(rays_rgb, [-1,3,3]) # [(N-1)*H*W, ro+rd+rgb, 3]
         rays_rgb = rays_rgb.astype(np.float32)
         print('shuffle rays')
-        np.random.shuffle(rays_rgb)
+        np.random.shuffle(rays_rgb)  
 
         print('done')
         i_batch = 0
@@ -706,35 +789,39 @@ def train():
 
     # Summary writers
     # writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
-    
+
+    # 4、开始训练  
     start = start + 1
     for i in trange(start, N_iters):
         time0 = time.time()
 
         # Sample random ray batch
-        if use_batching:
+        if use_batching:      # 分批加载光线，大小为 N_rand 
             # Random over all images
             batch = rays_rgb[i_batch:i_batch+N_rand] # [B, 2+1, 3*?]
             batch = torch.transpose(batch, 0, 1)
             batch_rays, target_s = batch[:2], batch[2]
 
             i_batch += N_rand
-            if i_batch >= rays_rgb.shape[0]:
+            if i_batch >= rays_rgb.shape[0]:   # 经过一定批次的处理后，所有的图片都经过了一次。这时候要对数据打乱，重新再挑选
                 print("Shuffle data after an epoch!")
                 rand_idx = torch.randperm(rays_rgb.shape[0])
                 rays_rgb = rays_rgb[rand_idx]
                 i_batch = 0
 
         else:
-            # Random from one image
+            # Random from one image 
+            # 从所有的图像中随机选择一张图像用于训练
             img_i = np.random.choice(i_train)
             target = images[img_i]
             target = torch.Tensor(target).to(device)
             pose = poses[img_i, :3,:4]
 
             if N_rand is not None:
+                # 生成这张图像中每个像素点对应的光线的原点和方向
                 rays_o, rays_d = get_rays(H, W, K, torch.Tensor(pose))  # (H, W, 3), (H, W, 3)
 
+                # 生成每个像素点的笛卡尔坐标，前 precrop_iters 生成图像中心的像素坐标坐标
                 if i < args.precrop_iters:
                     dH = int(H//2 * args.precrop_frac)
                     dW = int(W//2 * args.precrop_frac)
@@ -746,37 +833,55 @@ def train():
                     if i == start:
                         print(f"[Config] Center cropping of size {2*dH} x {2*dW} is enabled until iter {args.precrop_iters}")                
                 else:
+                    # 生成图像中每个像素的坐标
                     coords = torch.stack(torch.meshgrid(torch.linspace(0, H-1, H), torch.linspace(0, W-1, W)), -1)  # (H, W, 2)
 
                 coords = torch.reshape(coords, [-1,2])  # (H * W, 2)
+                # 注意，在训练的时候并不是给图像中每个像素都打光线，而是加载一批光线，批大小为 N_rand
                 select_inds = np.random.choice(coords.shape[0], size=[N_rand], replace=False)  # (N_rand,)
+                # 选择像素坐标
                 select_coords = coords[select_inds].long()  # (N_rand, 2)
+                # 选择对应的光线
                 rays_o = rays_o[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
                 rays_d = rays_d[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
                 batch_rays = torch.stack([rays_o, rays_d], 0)
                 target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
 
-        #####  Core optimization loop  #####
+                """
+                不论是 use_batching 的情况还是单张图像的情况，
+                每个 epoch 选择的光线的数量是恒定的，即 N_rand 。
+                这么做实际上是为了减少计算的工程量。
+                虽然每次都只随机挑选了一部分像素对应的光线，
+                但是经过多达 200 000 次的训练实际上已经足以把所有的像素对应的光线都挑选一遍了。
+                """
+
+        #####  Core optimization loop  ##### 
+        #####        核心优化循环        ##### 
         rgb, disp, acc, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
                                                 verbose=i < 10, retraw=True,
                                                 **render_kwargs_train)
+                    # render() 函数的各项参数
+                                # chunk : 并行处理的光线的数量
+                                # batch_rays : 经由上一的步骤我们挑选出的光线
+                                # render_kwargs_train : 初始化模型代码 create_nerf() 返回的字典数据
 
         optimizer.zero_grad()
-        img_loss = img2mse(rgb, target_s)
+        img_loss = img2mse(rgb, target_s)  # 计算 MSE 损失
         trans = extras['raw'][...,-1]
         loss = img_loss
-        psnr = mse2psnr(img_loss)
+        psnr = mse2psnr(img_loss)   # 将损失转换为 PSNR 指标
 
         if 'rgb0' in extras:
             img_loss0 = img2mse(extras['rgb0'], target_s)
             loss = loss + img_loss0
             psnr0 = mse2psnr(img_loss0)
 
-        loss.backward()
+        loss.backward()     # 损失反向传播
         optimizer.step()
 
         # NOTE: IMPORTANT!
         ###   update learning rate   ###
+        ###        动态更新学习率      ###
         decay_rate = 0.1
         decay_steps = args.lrate_decay * 1000
         new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
@@ -876,3 +981,11 @@ if __name__=='__main__':
     torch.set_default_tensor_type('torch.cuda.FloatTensor')
 
     train()
+
+"""
+1. 数据的加载
+2. 光线的生成
+3. NeRF 网络架构
+4. 渲染过程
+"""
+

@@ -152,22 +152,34 @@ class NeRF(nn.Module):
 # Ray helpers
 def get_rays(H, W, K, c2w):
     i, j = torch.meshgrid(torch.linspace(0, W-1, W), torch.linspace(0, H-1, H))  # pytorch's meshgrid has indexing='ij'
+    # np.meshgrid(a, b，indexing = "xy") 函数会返回 b.shape() 行 ，a.shape() 列的二维数组。
+    # 因此 i, j 都是 [H, W] 的二维数组。
+    # i 的每一行代表 x 轴坐标，j 的每一行代表 y 轴坐标。
+    # 如此一来我们的到了一个图片的每个像素点的笛卡尔坐标。
     i = i.t()
     j = j.t()
-    dirs = torch.stack([(i-K[0][2])/K[0][0], -(j-K[1][2])/K[1][1], -torch.ones_like(i)], -1)
+    dirs = torch.stack([(i-K[0][2])/K[0][0], -(j-K[1][2])/K[1][1], -torch.ones_like(i)], -1)    # 利用相机内参 K 计算每个像素坐标相对于光心的单位方向
     # Rotate ray directions from camera frame to the world frame
+    # 旋转光线方向从相机帧到世界帧
     rays_d = torch.sum(dirs[..., np.newaxis, :] * c2w[:3,:3], -1)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
     # Translate camera frame's origin to the world frame. It is the origin of all rays.
+    # 将相机帧的原点转换为世界帧。它是所有光线的起源。 
     rays_o = c2w[:3,-1].expand(rays_d.shape)
     return rays_o, rays_d
 
 
 def get_rays_np(H, W, K, c2w):
     i, j = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32), indexing='xy')
-    dirs = np.stack([(i-K[0][2])/K[0][0], -(j-K[1][2])/K[1][1], -np.ones_like(i)], -1)
+    # np.meshgrid(a, b，indexing = "xy") 函数会返回 b.shape() 行 ，a.shape() 列的二维数组。
+    # 因此 i, j 都是 [H, W] 的二维数组。
+    # i 的每一行代表 x 轴坐标，j 的每一行代表 y 轴坐标。
+    # 如此一来我们的到了一个图片的每个像素点的笛卡尔坐标。
+    dirs = np.stack([(i-K[0][2])/K[0][0], -(j-K[1][2])/K[1][1], -np.ones_like(i)], -1)    # 利用相机内参 K 计算每个像素坐标相对于光心的单位方向
     # Rotate ray directions from camera frame to the world frame
-    rays_d = np.sum(dirs[..., np.newaxis, :] * c2w[:3,:3], -1)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
+    # 旋转光线方向从相机帧到世界帧
+    rays_d = np.sum(dirs[..., np.newaxis, :] * c2w[:3,:3], -1)  # dot product(点积), equals to: [c2w.dot(dir) for dir in dirs]
     # Translate camera frame's origin to the world frame. It is the origin of all rays.
+    # 将相机帧的原点转换为世界帧。它是所有光线的起源。 利用相机外参转置矩阵将相机坐标转换为世界坐标。
     rays_o = np.broadcast_to(c2w[:3,-1], np.shape(rays_d))
     return rays_o, rays_d
 
